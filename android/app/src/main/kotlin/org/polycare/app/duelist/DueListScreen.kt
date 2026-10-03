@@ -73,6 +73,8 @@ fun DueListScreen(
     val report by viewModel.report.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val searchResults by viewModel.searchResults.collectAsStateWithLifecycle()
+    val allMembers by viewModel.members.collectAsStateWithLifecycle()
+    val allVisits by viewModel.visits.collectAsStateWithLifecycle()
 
     var activeTab by remember { mutableIntStateOf(0) } // 0: Due Visits, 1: Search Notes, 2: Monthly Report
     var expandedDueId by remember { mutableStateOf<String?>(null) }
@@ -130,9 +132,9 @@ fun DueListScreen(
                     .padding(4.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                TabChip("Due visits (${dueItems.size})", active = activeTab == 0, Modifier.weight(1f)) { activeTab = 0 }
-                TabChip("Search notes", active = activeTab == 1, Modifier.weight(1f)) { activeTab = 1 }
-                TabChip("Monthly report", active = activeTab == 2, Modifier.weight(1f)) { activeTab = 2 }
+                TabChip("Due (${dueItems.size})", active = activeTab == 0, Modifier.weight(1f)) { activeTab = 0 }
+                TabChip("Search", active = activeTab == 1, Modifier.weight(1f)) { activeTab = 1 }
+                TabChip("Report", active = activeTab == 2, Modifier.weight(1f)) { activeTab = 2 }
             }
         }
 
@@ -160,6 +162,10 @@ fun DueListScreen(
                 items(dueItems, key = { it.id }) { item ->
                     DueItemCard(
                         item = item,
+                        member = allMembers.firstOrNull { it.id == item.memberId },
+                        lastVisit = allVisits
+                            .filter { it.householdId == item.householdId && it.memberId == item.memberId }
+                            .maxByOrNull { it.date },
                         expanded = expandedDueId == item.id,
                         onToggle = { expandedDueId = if (expandedDueId == item.id) null else item.id },
                         onComplete = { notes, highRisk ->
@@ -241,6 +247,8 @@ private fun TabChip(label: String, active: Boolean, modifier: Modifier, onClick:
 @Composable
 private fun DueItemCard(
     item: DueItem,
+    member: org.polycare.app.households.Member?,
+    lastVisit: org.polycare.app.households.Visit?,
     expanded: Boolean,
     onToggle: () -> Unit,
     onComplete: (String, Boolean) -> Unit,
@@ -253,33 +261,37 @@ private fun DueItemCard(
         Modifier.fillMaxWidth().clickable(onClickLabel = if (expanded) "Collapse visit" else "Open visit", role = androidx.compose.ui.semantics.Role.Button, onClick = onToggle),
         accent = if (isHighRisk) Brand.Rose else Accent,
     ) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(item.memberName, style = MaterialTheme.typography.titleMedium, color = Brand.Ink)
-                    Spacer(Modifier.width(8.dp))
-                    Text("· ${item.village}", style = MaterialTheme.typography.bodySmall, color = Brand.InkMuted)
-                }
-                Spacer(Modifier.height(4.dp))
-                Text(item.reason, style = MaterialTheme.typography.bodySmall, color = if (isHighRisk) Brand.Red else Brand.Ink)
-                Spacer(Modifier.height(2.dp))
-                val overdue = (dueDay(item) ?: 0L) < 0
-                Text(dueLabel(item), style = MaterialTheme.typography.labelLarge, color = if (overdue) Brand.Red else Brand.InkMuted)
-            }
+        // Stacked top to bottom so long names and villages wrap instead of being squeezed beside a pill.
+        val overdue = (dueDay(item) ?: 0L) < 0
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(item.memberName, style = MaterialTheme.typography.titleMedium, color = Brand.Ink, modifier = Modifier.weight(1f))
             Spacer(Modifier.width(8.dp))
-            Column(horizontalAlignment = Alignment.End) {
-                StatusPill(
-                    item.visitType.label,
-                    dot = if (isHighRisk) Brand.Rose else Accent,
-                )
-                Spacer(Modifier.height(4.dp))
-                Icon(
-                    if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-                    contentDescription = null,
-                    tint = Brand.InkMuted,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
+            Icon(
+                if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                contentDescription = null,
+                tint = Brand.InkMuted,
+                modifier = Modifier.size(24.dp),
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        StatusPill(
+            "${item.visitType.label}${if (isHighRisk) " · High risk" else ""}",
+            dot = if (isHighRisk) Brand.Rose else Accent,
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(dueLabel(item), style = MaterialTheme.typography.titleSmall, color = if (overdue) Brand.Red else Brand.Ink)
+        Spacer(Modifier.height(4.dp))
+        Text(item.reason, style = MaterialTheme.typography.bodyMedium, color = if (isHighRisk) Brand.Red else Brand.Ink)
+        Spacer(Modifier.height(8.dp))
+        val who = buildList {
+            member?.let { add("Age ${it.age} · ${it.relation}") }
+            add("Village: ${item.village}")
+            if (item.householdHead.isNotBlank() && item.householdHead != item.memberName) add("Household of ${item.householdHead}")
+        }
+        who.forEach { Text(it, style = MaterialTheme.typography.bodyMedium, color = Brand.InkMuted) }
+        lastVisit?.let {
+            Spacer(Modifier.height(8.dp))
+            Text("Last visit ${it.date}: ${it.notes}", style = MaterialTheme.typography.bodyMedium, color = Brand.Ink, maxLines = 3)
         }
 
         if (expanded) {

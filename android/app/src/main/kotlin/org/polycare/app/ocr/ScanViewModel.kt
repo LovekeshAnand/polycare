@@ -74,8 +74,18 @@ class ScanViewModel @Inject constructor(
         }
     }
 
-    private fun done(result: OcrEngine.Result): ScanUi.Done =
-        ScanUi.Done(result, McpFieldExtractor.extract(result.latinText, result.devanagariText))
+    private fun done(result: OcrEngine.Result): ScanUi.Done {
+        val candidates = McpFieldExtractor.extract(result.latinText, result.devanagariText)
+        // Debug builds only: the rows the engine read and the fields they filled, for offline OCR testing over adb.
+        if (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+            android.util.Log.i(
+                "PolyCareOcrTest",
+                "ROWS=" + (result.latinText + "\n" + result.devanagariText).trim().replace("\n", " | ") +
+                    " => name=${candidates.name} village=${candidates.village} age=${candidates.age} notes=${candidates.clinicalNotes} ms=${result.ms}",
+            )
+        }
+        return ScanUi.Done(result, candidates)
+    }
 
     /**
      * M3: "OCR scan... → confirmed fields in the household record." [name]/[village] are

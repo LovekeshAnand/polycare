@@ -54,6 +54,7 @@ class DueListViewModel @Inject constructor(
     val searchResults: StateFlow<List<VisitSearchResult>> = _searchResults.asStateFlow()
 
     val visits: StateFlow<List<Visit>> = repo.visits
+    val members: StateFlow<List<org.polycare.app.households.Member>> = repo.members
 
     val filteredDueItems: StateFlow<List<DueItem>> = combine(repo.dueItems, _filter) { items, currentFilter ->
         val pending = items.filter { !it.completed }.sortedWith(compareBy<DueItem> { it.priority != DuePriority.HIGH }.thenBy { dueDay(it) ?: Long.MAX_VALUE })

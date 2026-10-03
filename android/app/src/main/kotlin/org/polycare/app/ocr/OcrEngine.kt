@@ -2,7 +2,10 @@ package org.polycare.app.ocr
 
 import android.graphics.Bitmap
 import android.graphics.Matrix
+import android.graphics.RectF
 import android.content.Context
+import com.paddle.ocr.model.OCRResult
+import org.polycare.common.PolyCareConfig
 import dagger.hilt.android.qualifiers.ApplicationContext
 import com.google.android.gms.tasks.Task
 import com.google.mlkit.vision.common.InputImage
@@ -89,13 +92,14 @@ class OcrEngine @Inject constructor(
 
     private suspend fun recognizeWithPaddle(bitmap: Bitmap, rotationDegrees: Int): Pair<String, String> {
         check(OpenCVUtils.init(context)) { "OpenCV native runtime did not initialize" }
-        val rotated = if (rotationDegrees % 360 == 0) bitmap else Bitmap.createBitmap(
-            bitmap, 0, 0, bitmap.width, bitmap.height, Matrix().apply { postRotate(rotationDegrees.toFloat()) }, true,
-        )
+        var rotated = rotate(bitmap, rotationDegrees)
         try {
             return paddleMutex.withLock {
-                val config = PaddleOCRConfig(detLimitSideLen = 960, detLimitType = "max", recScoreThresh = 0.0f, recBatchSize = 1)
-                suspend fun recognize(script: String, current: PaddleOCR?): Pair<String, PaddleOCR> {
+                val config = PaddleOCRConfig(
+                    detLimitSideLen = PolyCareConfig.Ocr.detectorMaxSidePx, detLimitType = "max",
+                    recScoreThresh = 0.0f, recBatchSize = 1,
+                )
+                suspend fun recognize(script: String, current: PaddleOCR?, image: Bitmap): Pair<List<OCRResult>, PaddleOCR> {
                     val engine = current ?: PaddleOCR.create(
                         context = context,
                         config = config,
@@ -104,17 +108,103 @@ class OcrEngine @Inject constructor(
                         recModelAssetPath = "models/ocr/$script/inference.onnx",
                         recConfigAssetPath = "models/ocr/$script/inference.yml",
                     )
-                    return engine.recognize(rotated).results.joinToString("\n") { it.text } to engine
+                    return engine.recognize(image).results to engine
                 }
-                val (latinText, loadedLatin) = recognize("latin", latinPaddle)
+                var (latinLines, loadedLatin) = recognize("latin", latinPaddle, rotated)
                 latinPaddle = loadedLatin
-                val (devanagariText, loadedDevanagari) = recognize("devanagari", devanagariPaddle)
+                // A photo is often taken sideways. If most text boxes are tall, try the other two turns
+                // with the fast Latin pass and keep whichever orientation the engine reads best.
+                if (looksSideways(latinLines)) {
+                    var best = rotated to latinLines
+                    for (turn in listOf(90, 270)) {
+                        val candidate = rotate(rotated, turn)
+                        val (lines, engine) = recognize("latin", latinPaddle, candidate)
+                        latinPaddle = engine
+                        if (readability(lines) > readability(best.second)) {
+                            if (best.first !== rotated) best.first.recycle()
+                            best = candidate to lines
+                        } else {
+                            candidate.recycle()
+                        }
+                    }
+                    if (best.first !== rotated) {
+                        if (rotated !== bitmap) rotated.recycle()
+                        rotated = best.first
+                    }
+                    latinLines = best.second
+                    events.record(Category.MODEL, "OCR photo was sideways; re-read upright", mapOf("lines" to latinLines.size))
+                }
+                val (devanagariLines, loadedDevanagari) = recognize("devanagari", devanagariPaddle, rotated)
                 devanagariPaddle = loadedDevanagari
-                latinText to devanagariText
+                val (latinKept, devanagariKept) = keepBestScriptPerLine(latinLines, devanagariLines)
+                // One pass over both scripts: "Name :" (Latin) and its Hindi value share a row.
+                val rows = RowBuilder.rows((latinKept + devanagariKept).map(::toBox))
+                val (hindiRows, englishRows) = rows.partition { DevanagariTransliterator.containsDevanagari(it) }
+                englishRows.joinToString("\n") to hindiRows.joinToString("\n")
             }
         } finally {
             if (rotated !== bitmap) rotated.recycle()
         }
+    }
+
+    /**
+     * Both recognizers read every detected line, so each script's output is full of garbage for the
+     * other script's lines. The detector finds the same boxes for both, so match lines by position
+     * and keep each one only in the script that read it with more confidence; drop weak lines.
+     */
+    private fun keepBestScriptPerLine(latin: List<OCRResult>, devanagari: List<OCRResult>): Pair<List<OCRResult>, List<OCRResult>> {
+        val keepLatin = BooleanArray(latin.size) { true }
+        val keepDeva = BooleanArray(devanagari.size) { true }
+        val taken = BooleanArray(devanagari.size)
+        for ((i, l) in latin.withIndex()) {
+            val j = devanagari.indices.firstOrNull { !taken[it] && sameLine(l, devanagari[it]) } ?: continue
+            taken[j] = true
+            if (l.confidence >= devanagari[j].confidence) keepDeva[j] = false else keepLatin[i] = false
+        }
+        val min = PolyCareConfig.Ocr.minLineConfidence
+        // The Devanagari model also reads Latin letters (and sometimes beats the Latin model on them),
+        // so file each winning line by the script it actually contains, in reading order.
+        val winners = (latin.filterIndexed { i, r -> keepLatin[i] && r.confidence >= min } +
+            devanagari.filterIndexed { j, r -> keepDeva[j] && r.confidence >= min })
+            .sortedWith(compareBy({ r -> r.box.points.minOf { it.y } }, { r -> r.box.points.minOf { it.x } }))
+        return winners.partition { r -> r.text.none { it in 'ऀ'..'ॿ' } }
+    }
+
+    private fun rotate(bitmap: Bitmap, degrees: Int): Bitmap =
+        if (degrees % 360 == 0) bitmap else Bitmap.createBitmap(
+            bitmap, 0, 0, bitmap.width, bitmap.height, Matrix().apply { postRotate(degrees.toFloat()) }, true,
+        )
+
+    /** True when most readable text boxes are taller than wide: the photo was taken sideways. */
+    private fun looksSideways(lines: List<OCRResult>): Boolean {
+        val boxes = lines.filter { it.text.length >= 3 && it.confidence >= PolyCareConfig.Ocr.minLineConfidence }.map(::toBox)
+        if (boxes.size < 3) return false
+        return boxes.count { (it.maxY - it.minY) > 1.3f * (it.maxX - it.minX) } * 2 > boxes.size
+    }
+
+    /** How well the engine read an orientation: confidence-weighted count of letters and digits. */
+    private fun readability(lines: List<OCRResult>): Float =
+        lines.sumOf { (it.confidence * it.text.count(Char::isLetterOrDigit)).toDouble() }.toFloat()
+
+    private fun toBox(r: OCRResult): TextBox {
+        val p = r.box.points
+        // Slope of the box's longer edge: how far the handwriting is tilted from level.
+        val e1x = p[1].x - p[0].x; val e1y = p[1].y - p[0].y
+        val e2x = p[2].x - p[1].x; val e2y = p[2].y - p[1].y
+        val (dx, dy) = if (e1x * e1x + e1y * e1y >= e2x * e2x + e2y * e2y) e1x to e1y else e2x to e2y
+        var angle = Math.toDegrees(kotlin.math.atan2(dy, dx).toDouble()).toFloat()
+        if (angle > 90f) angle -= 180f
+        if (angle < -90f) angle += 180f
+        return TextBox(r.text, p.minOf { it.x }, p.maxOf { it.x }, p.minOf { it.y }, p.maxOf { it.y }, slopeDeg = angle)
+    }
+
+    private fun sameLine(a: OCRResult, b: OCRResult): Boolean {
+        fun bounds(r: OCRResult) = RectF(
+            r.box.points.minOf { it.x }, r.box.points.minOf { it.y }, r.box.points.maxOf { it.x }, r.box.points.maxOf { it.y },
+        )
+        val ra = bounds(a)
+        val rb = bounds(b)
+        return ra.contains(rb.centerX(), rb.centerY()) || rb.contains(ra.centerX(), ra.centerY())
     }
 
     private suspend fun <T> Task<T>.await(): T = suspendCancellableCoroutine { cont ->

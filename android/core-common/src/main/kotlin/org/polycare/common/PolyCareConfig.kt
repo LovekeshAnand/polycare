@@ -27,6 +27,13 @@ object PolyCareConfig {
         const val stalenessHalfLifeMs = 14L * 24 * 60 * 60 * 1000
     }
 
+    object Ocr {
+        /** Longest image side (px) the text detector sees. 960 turns a photographed page's body text into smudges. */
+        const val detectorMaxSidePx = 1536
+        /** A line whose best recognizer is less sure than this is dropped as noise. */
+        const val minLineConfidence = 0.3f
+    }
+
     object Conflicts {
         const val nearDuplicateCosine = 0.90f
     }

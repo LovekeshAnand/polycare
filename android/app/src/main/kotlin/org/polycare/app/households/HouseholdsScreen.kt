@@ -237,7 +237,7 @@ private fun HouseholdCard(
             Spacer(Modifier.height(20.dp))
             SectionLabel("Log a visit", color = Brand.Ink)
             Spacer(Modifier.height(8.dp))
-            LogVisitForm(household, members, viewModel)
+            LogVisitForm(household, members, viewModel, onSaved = onToggle)
         } else {
             Spacer(Modifier.height(8.dp))
             Text(
@@ -249,7 +249,7 @@ private fun HouseholdCard(
         Spacer(Modifier.height(20.dp))
         SectionLabel("Household details", color = Brand.Ink)
         Spacer(Modifier.height(8.dp))
-        EditHouseholdForm(household, viewModel)
+        EditHouseholdForm(household, viewModel, onSaved = onToggle)
 
         Spacer(Modifier.height(20.dp))
         Hairline()
@@ -362,7 +362,7 @@ private fun AddMemberRow(onAdd: (String, Int, String) -> Boolean) {
 }
 
 @Composable
-private fun EditHouseholdForm(household: Household, viewModel: HouseholdsViewModel) {
+private fun EditHouseholdForm(household: Household, viewModel: HouseholdsViewModel, onSaved: () -> Unit) {
     var head by remember(household.id, household.headOfHousehold) { mutableStateOf(household.headOfHousehold) }
     var village by remember(household.id, household.village) { mutableStateOf(household.village) }
     var saved by remember { mutableStateOf(false) }
@@ -373,7 +373,10 @@ private fun EditHouseholdForm(household: Household, viewModel: HouseholdsViewMod
     val changed = head.trim() != household.headOfHousehold || village.trim() != household.village
     SecondaryButton(
         if (saved) "Saved" else "Save changes",
-        onClick = { saved = viewModel.updateHousehold(household.id, head, village) },
+        onClick = {
+            saved = viewModel.updateHousehold(household.id, head, village)
+            if (saved) onSaved()
+        },
         enabled = changed && head.isNotBlank() && village.isNotBlank(), icon = Icons.Outlined.Edit, accent = Accent,
     )
 }
@@ -382,7 +385,7 @@ private val FollowUps = listOf<Pair<String, Int?>>("None" to null, "Tomorrow" to
 
 /** Logs a visit that was not on the due list; can schedule the next one. */
 @Composable
-private fun LogVisitForm(household: Household, members: List<Member>, viewModel: HouseholdsViewModel) {
+private fun LogVisitForm(household: Household, members: List<Member>, viewModel: HouseholdsViewModel, onSaved: () -> Unit) {
     var memberId by remember(household.id) { mutableStateOf<String?>(null) }
     var type by remember { mutableStateOf(VisitType.ROUTINE) }
     var notes by remember { mutableStateOf("") }
@@ -413,7 +416,7 @@ private fun LogVisitForm(household: Household, members: List<Member>, viewModel:
         onClick = {
             val member = members.firstOrNull { it.id == memberId }
             saved = viewModel.logVisit(household.id, member?.id, member?.name, type, notes, highRisk, followUp)
-            if (saved) { notes = ""; highRisk = false; followUp = null }
+            if (saved) { notes = ""; highRisk = false; followUp = null; onSaved() }
         },
         accent = Accent,
     )
